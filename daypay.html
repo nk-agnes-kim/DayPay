@@ -1,0 +1,779 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+  <title>DayPay - 현장 급여 관리</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #f5f4f0; font-family: 'Apple SD Gothic Neo', 'Noto Sans KR', sans-serif; }
+    input[type=date]::-webkit-calendar-picker-indicator { filter: none; }
+    button:active { opacity: 0.82; }
+    ::-webkit-scrollbar { width: 4px; }
+    ::-webkit-scrollbar-thumb { background: #c9a84c44; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef } = React;
+
+    // ── 유틸 ──
+    const todayStr = () => {
+      const d = new Date();
+      return d.getFullYear() + "-" + String(d.getMonth()+1).padStart(2,"0") + "-" + String(d.getDate()).padStart(2,"0");
+    };
+    const krw = (n) => Number(n).toLocaleString("ko-KR") + "원";
+    const calcTax = (amt) => Math.floor(Math.max(0, amt - 150000) * 0.06 * 0.55);
+
+    const shrinkImg = (file) => new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const img = new Image();
+        img.onload = () => {
+          const max = 600;
+          let w = img.width, h = img.height;
+          if (w > max) { h = Math.floor(h * max / w); w = max; }
+          if (h > max) { w = Math.floor(w * max / h); h = max; }
+          const c = document.createElement("canvas");
+          c.width = w; c.height = h;
+          c.getContext("2d").drawImage(img, 0, 0, w, h);
+          resolve(c.toDataURL("image/jpeg", 0.65));
+        };
+        img.src = e.target.result;
+      };
+      reader.readAsDataURL(file);
+    });
+
+    const maskRRN = (rrn) => {
+      if (!rrn) return "";
+      const c = rrn.replace(/-/g,"");
+      if (c.length < 7) return rrn;
+      return c.slice(0,6) + "-" + c[6] + "******";
+    };
+    const formatRRN = (val) => {
+      const c = val.replace(/[^0-9]/g,"").slice(0,13);
+      return c.length > 6 ? c.slice(0,6)+"-"+c.slice(6) : c;
+    };
+
+    const getDaysInMonth = (y, m) => new Date(y, m+1, 0).getDate();
+    const getFirstDay = (y, m) => new Date(y, m, 1).getDay();
+
+    // 캔버스 둥근 사각형 (크로스 브라우저)
+    const roundRect = (ctx, x, y, w, h, r) => {
+      ctx.beginPath();
+      ctx.moveTo(x+r, y);
+      ctx.lineTo(x+w-r, y);
+      ctx.quadraticCurveTo(x+w, y, x+w, y+r);
+      ctx.lineTo(x+w, y+h-r);
+      ctx.quadraticCurveTo(x+w, y+h, x+w-r, y+h);
+      ctx.lineTo(x+r, y+h);
+      ctx.quadraticCurveTo(x, y+h, x, y+h-r);
+      ctx.lineTo(x, y+r);
+      ctx.quadraticCurveTo(x, y, x+r, y);
+      ctx.closePath();
+      ctx.fill();
+    };
+
+    // 공유 이미지 생성
+    const makeShareImg = (query, recs, totAmt, totTax, company) => {
+      const W = 800, ITEM_H = 50, TOP = 185, STAT_H = 104;
+      const maxRows = Math.min(recs.length, 12);
+      const H = TOP + STAT_H + maxRows * ITEM_H + 60;
+      const cv = document.createElement("canvas");
+      cv.width = W; cv.height = H;
+      const g = cv.getContext("2d");
+      g.fillStyle = "#f5f4f0"; g.fillRect(0,0,W,H);
+      const grad = g.createLinearGradient(0,0,0,TOP);
+      grad.addColorStop(0,"#1a2040"); grad.addColorStop(1,"#2a3468");
+      g.fillStyle = grad; g.fillRect(0,0,W,TOP);
+      g.fillStyle = "#c9a84c"; g.fillRect(0,TOP-3,W,3);
+      if (company) { g.fillStyle="#c9a84c"; g.font="600 18px Arial"; g.fillText(company,32,46); }
+      g.fillStyle="#fff"; g.font="bold 36px Arial"; g.fillText("DayPay",32,company?92:72);
+      g.fillStyle="#7080a0"; g.font="16px Arial"; g.fillText("현장 급여 관리",32,company?120:102);
+      g.fillStyle="#c9a84c"; g.font="bold 20px Arial";
+      g.fillText('"'+query+'" 검색결과  '+recs.length+"건",32,company?155:140);
+      const now=new Date();
+      g.fillStyle="#5060a0"; g.font="13px Arial"; g.textAlign="right";
+      g.fillText(now.getFullYear()+"."+String(now.getMonth()+1).padStart(2,"0")+"."+String(now.getDate()).padStart(2,"0"),W-32,TOP-14);
+      g.textAlign="left";
+      const statY=TOP+12, statW=(W-64-32)/3;
+      [["총 지급액",krw(totAmt),"#1a2040"],["원천세",krw(totTax),"#b86020"],["건수",recs.length+"건","#1a3a8c"]].forEach((s,i)=>{
+        const bx=32+i*(statW+16);
+        g.fillStyle="#fff"; roundRect(g,bx,statY,statW,76,8);
+        g.fillStyle="#8090a0"; g.font="12px Arial"; g.fillText(s[0],bx+14,statY+22);
+        g.fillStyle=s[2]; g.font="bold 18px Arial"; g.fillText(s[1],bx+14,statY+52);
+      });
+      const tblY=TOP+STAT_H+8;
+      g.fillStyle="#1a2040"; g.fillRect(0,tblY,W,34);
+      g.fillStyle="#c9a84c"; g.font="bold 12px Arial";
+      const cols=["날짜","성명","현장","공정","지급액","방식"];
+      const cw=[110,100,160,130,160,80];
+      let cx=32;
+      cols.forEach((col,i)=>{ g.fillText(col,cx,tblY+22); cx+=cw[i]; });
+      recs.slice(0,maxRows).forEach((r,ri)=>{
+        const ry=tblY+34+ri*ITEM_H;
+        g.fillStyle=ri%2===0?"#fff":"#f9f8f5"; g.fillRect(0,ry,W,ITEM_H);
+        const cells=[r.date,r.name,r.site||"-",r.work||"-",krw(r.amount),r.payMethod||"현금"];
+        let rx=32;
+        cells.forEach((cell,ci)=>{
+          g.fillStyle=ci===4?"#1a3a8c":"#1a2040";
+          g.font=ci===4?"bold 13px Arial":"13px Arial";
+          let txt=String(cell);
+          while(g.measureText(txt).width>cw[ci]-10&&txt.length>1) txt=txt.slice(0,-1);
+          if(txt!==String(cell)) txt+="…";
+          g.fillText(txt,rx,ry+ITEM_H/2+5); rx+=cw[ci];
+        });
+        g.fillStyle="#e8e6e0"; g.fillRect(0,ry+ITEM_H-1,W,1);
+      });
+      g.fillStyle="#1a2040"; g.fillRect(0,H-36,W,36);
+      g.fillStyle="#c9a84c"; g.font="bold 13px Arial"; g.fillText("DayPay",32,H-12);
+      g.fillStyle="#5060a0"; g.font="12px Arial"; g.textAlign="right";
+      g.fillText("현장 급여 관리",W-32,H-12); g.textAlign="left";
+      return cv;
+    };
+
+    // ── 색상 상수 ──
+    const NAVY="#1a2040", NAVY2="#2a3468", GOLD="#c9a84c";
+    const BG="#f5f4f0", BORDER="#e4e2d8", MID="#5a6480";
+    const LIGHT="#a0aab8", ORANGE="#b86020", BLUE="#1a3a8c";
+
+    const INP = { width:"100%", padding:"10px 12px", borderRadius:8, border:"1.5px solid "+BORDER,
+      background:"#faf9f6", color:NAVY, fontSize:14, fontFamily:"inherit", outline:"none", boxSizing:"border-box" };
+
+    // ── 공통 컴포넌트 ──
+    function Lbl({ children }) {
+      return <label style={{ fontSize:11, color:MID, display:"block", marginBottom:5, fontWeight:700 }}>{children}</label>;
+    }
+    function Empty({ text }) {
+      return <div style={{ textAlign:"center", color:LIGHT, padding:36, fontSize:13, background:"#fff", borderRadius:12, border:"1px solid "+BORDER }}>{text}</div>;
+    }
+    function SecTitle({ children }) {
+      return (
+        <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:8, marginTop:4 }}>
+          <div style={{ width:3, height:14, background:GOLD, borderRadius:2 }} />
+          <span style={{ fontSize:12, color:MID, fontWeight:700 }}>{children}</span>
+        </div>
+      );
+    }
+    function NavyBtn({ onClick, children, style }) {
+      return (
+        <button onClick={onClick} style={{ padding:"12px 0", borderRadius:10, border:"none", cursor:"pointer",
+          background:"linear-gradient(135deg,"+NAVY+","+NAVY2+")", color:"#fff", fontWeight:700, fontSize:14,
+          fontFamily:"inherit", boxShadow:"0 4px 14px rgba(26,32,64,0.25)", ...style }}>{children}</button>
+      );
+    }
+    function BottomModal({ onClose, children }) {
+      return (
+        <div onClick={(e)=>{ if(e.target===e.currentTarget) onClose(); }}
+          style={{ position:"fixed", inset:0, background:"rgba(26,32,64,0.55)", zIndex:100,
+            display:"flex", alignItems:"flex-end", justifyContent:"center" }}>
+          <div style={{ width:"100%", maxWidth:680, background:"#fff", borderRadius:"20px 20px 0 0",
+            padding:22, paddingBottom:44, maxHeight:"90vh", overflowY:"auto" }}>
+            {children}
+          </div>
+        </div>
+      );
+    }
+    function RCard({ r, onEdit, onDelete }) {
+      const pm = r.payMethod||"현금";
+      return (
+        <div style={{ background:"#fff", borderRadius:12, border:"1px solid "+BORDER, padding:"11px 13px",
+          marginBottom:7, boxShadow:"0 2px 8px rgba(26,32,64,0.05)", display:"flex", alignItems:"center", gap:10 }}>
+          <div style={{ flex:1 }}>
+            <div style={{ display:"flex", alignItems:"center", flexWrap:"wrap", gap:5, marginBottom:4 }}>
+              <span style={{ fontWeight:700, color:NAVY }}>{r.name}</span>
+              <span style={{ fontSize:11, color:LIGHT }}>{r.date}</span>
+              <span style={{ fontSize:10, padding:"2px 6px", borderRadius:4, fontWeight:600,
+                background:pm==="현금"?"#fdf6ee":"#eef4f8", color:pm==="현금"?ORANGE:BLUE }}>{pm}</span>
+              {r.site ? <span style={{ fontSize:10, padding:"2px 6px", borderRadius:4, background:"#f0eefc", color:"#5040a0", fontWeight:600 }}>{r.site}</span> : null}
+              {r.work ? <span style={{ fontSize:10, padding:"2px 6px", borderRadius:4, background:"#f0f0ec", color:MID }}>{r.work}</span> : null}
+            </div>
+            <div style={{ display:"flex", gap:8, alignItems:"center" }}>
+              <span style={{ fontSize:15, color:NAVY, fontWeight:700 }}>{krw(r.amount)}</span>
+              <span style={{ fontSize:11, padding:"2px 7px", borderRadius:5, background:"#fdf6ee", color:ORANGE }}>세금 {krw(calcTax(r.amount))}</span>
+            </div>
+          </div>
+          <div style={{ display:"flex", gap:5, flexShrink:0 }}>
+            <button onClick={()=>onEdit(r)} style={{ padding:"5px 9px", borderRadius:6,
+              border:"1px solid "+GOLD+"80", background:GOLD+"18", color:GOLD,
+              fontSize:11, cursor:"pointer", fontFamily:"inherit", fontWeight:700 }}>수정</button>
+            <button onClick={()=>onDelete(r.id)} style={{ padding:"5px 9px", borderRadius:6,
+              border:"1px solid #f0c0c0", background:"#fff5f5", color:"#c04040",
+              fontSize:11, cursor:"pointer", fontFamily:"inherit", fontWeight:600 }}>삭제</button>
+          </div>
+        </div>
+      );
+    }
+    function GrpSection({ title, data }) {
+      return (
+        <div style={{ marginBottom:12 }}>
+          <SecTitle>{title}</SecTitle>
+          {Object.entries(data).sort((a,b)=>b[1].total-a[1].total).map(([k,s])=>(
+            <div key={k} style={{ background:"#fff", borderRadius:10, border:"1px solid "+BORDER,
+              padding:"10px 13px", marginBottom:6, display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+              <div><span style={{ fontWeight:600 }}>{k}</span><span style={{ fontSize:11, color:LIGHT, marginLeft:8 }}>{s.days}일</span></div>
+              <div style={{ textAlign:"right" }}>
+                <div style={{ color:NAVY, fontWeight:700 }}>{krw(s.total)}</div>
+                <div style={{ fontSize:11, color:ORANGE }}>세금 {krw(s.taxSum)}</div>
+              </div>
+            </div>
+          ))}
+        </div>
+      );
+    }
+
+    // ── 달력 탭 ──
+    function CalendarTab({ records, onEdit, onDelete }) {
+      const now = new Date();
+      const [calYear, setCalYear] = useState(now.getFullYear());
+      const [calMonth, setCalMonth] = useState(now.getMonth());
+      const [selDay, setSelDay] = useState(null);
+      const WEEK = ["일","월","화","수","목","금","토"];
+      const daysInMonth = getDaysInMonth(calYear, calMonth);
+      const firstDay = getFirstDay(calYear, calMonth);
+      const dayMap = {};
+      records.forEach((r) => {
+        const prefix = calYear+"-"+String(calMonth+1).padStart(2,"0");
+        if (r.date.startsWith(prefix)) {
+          const d = parseInt(r.date.slice(8), 10);
+          if (!dayMap[d]) dayMap[d] = { count:0, total:0 };
+          dayMap[d].count++; dayMap[d].total += r.amount;
+        }
+      });
+      const selDateStr = selDay ? calYear+"-"+String(calMonth+1).padStart(2,"0")+"-"+String(selDay).padStart(2,"0") : null;
+      const dayRecs = selDateStr ? records.filter(r=>r.date===selDateStr) : [];
+      const dayTotal = dayRecs.reduce((s,r)=>s+r.amount,0);
+      const dayTax   = dayRecs.reduce((s,r)=>s+calcTax(r.amount),0);
+      const prevMonth = () => { if(calMonth===0){setCalYear(y=>y-1);setCalMonth(11);}else setCalMonth(m=>m-1); setSelDay(null); };
+      const nextMonth = () => { if(calMonth===11){setCalYear(y=>y+1);setCalMonth(0);}else setCalMonth(m=>m+1); setSelDay(null); };
+      const isToday = (d) => d===now.getDate()&&calMonth===now.getMonth()&&calYear===now.getFullYear();
+      const cells = [];
+      for (let i=0;i<firstDay;i++) cells.push(null);
+      for (let d=1;d<=daysInMonth;d++) cells.push(d);
+      while (cells.length%7!==0) cells.push(null);
+      return (
+        <div>
+          <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:14 }}>
+            <button onClick={prevMonth} style={{ width:38,height:38,borderRadius:8,border:"1px solid "+BORDER,background:"#fff",cursor:"pointer",fontSize:18,display:"flex",alignItems:"center",justifyContent:"center",color:NAVY }}>‹</button>
+            <div style={{ textAlign:"center" }}>
+              <div style={{ fontSize:18,fontWeight:800,color:NAVY }}>{calYear}년 {calMonth+1}월</div>
+              <div style={{ fontSize:11,color:LIGHT,marginTop:2 }}>
+                {Object.keys(dayMap).length}일 근무 · {krw(Object.values(dayMap).reduce((s,v)=>s+v.total,0))}
+              </div>
+            </div>
+            <button onClick={nextMonth} style={{ width:38,height:38,borderRadius:8,border:"1px solid "+BORDER,background:"#fff",cursor:"pointer",fontSize:18,display:"flex",alignItems:"center",justifyContent:"center",color:NAVY }}>›</button>
+          </div>
+          <div style={{ background:"#fff",borderRadius:14,border:"1px solid "+BORDER,padding:14,marginBottom:14,boxShadow:"0 2px 10px rgba(26,32,64,0.06)" }}>
+            <div style={{ display:"grid",gridTemplateColumns:"repeat(7,1fr)",marginBottom:6 }}>
+              {WEEK.map((w,i)=>(
+                <div key={w} style={{ textAlign:"center",fontSize:11,fontWeight:700,padding:"4px 0",
+                  color:i===0?"#c04040":i===6?BLUE:MID }}>{w}</div>
+              ))}
+            </div>
+            <div style={{ display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:2 }}>
+              {cells.map((d,i)=>{
+                if (!d) return <div key={"e"+i} style={{ aspectRatio:"1" }} />;
+                const hasRec=!!dayMap[d], isSel=selDay===d, isTod=isToday(d);
+                const col=(firstDay+d-1)%7;
+                const isSun=col===0, isSat=col===6;
+                return (
+                  <div key={d} onClick={()=>setSelDay(isSel?null:d)}
+                    style={{ aspectRatio:"1",borderRadius:8,display:"flex",flexDirection:"column",
+                      alignItems:"center",justifyContent:"center",cursor:hasRec?"pointer":"default",
+                      position:"relative",transition:"all 0.15s",
+                      background:isSel?NAVY:isTod?GOLD+"20":"transparent",
+                      border:isTod&&!isSel?"1.5px solid "+GOLD:"1px solid transparent" }}>
+                    <span style={{ fontSize:13,fontWeight:hasRec||isTod?700:400,
+                      color:isSel?"#fff":isSun?"#c04040":isSat?BLUE:NAVY }}>{d}</span>
+                    {hasRec && (
+                      <div style={{ position:"absolute",bottom:3,left:"50%",transform:"translateX(-50%)" }}>
+                        <div style={{ width:4,height:4,borderRadius:"50%",background:isSel?"#fff":GOLD }} />
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+          {selDay && (
+            <div>
+              <div style={{ display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10 }}>
+                <SecTitle>{calMonth+1}월 {selDay}일 내역</SecTitle>
+                {dayRecs.length>0 && <div style={{ fontSize:12,color:NAVY,fontWeight:700 }}>{krw(dayTotal)} · 세금 {krw(dayTax)}</div>}
+              </div>
+              {dayRecs.length===0
+                ? <Empty text="이 날 내역이 없습니다" />
+                : dayRecs.map(r=><RCard key={r.id} r={r} onEdit={onEdit} onDelete={onDelete}/>)
+              }
+            </div>
+          )}
+          {!selDay && <div style={{ textAlign:"center",color:LIGHT,fontSize:13,padding:"20px 0" }}>날짜를 탭하면 해당일 내역을 볼 수 있어요</div>}
+        </div>
+      );
+    }
+
+    // ── 메인 앱 ──
+    function App() {
+      const [tab, setTab] = useState("input");
+      const [records, setRecords] = useState([]);
+      const [workers, setWorkers] = useState([]);
+      const [company, setCompany] = useState("");
+      const [loaded, setLoaded] = useState(false);
+      const [toastMsg, setToastMsg] = useState("");
+      const [editId, setEditId] = useState(null);
+
+      const [fName, setFName] = useState("");
+      const [fDate, setFDate] = useState(todayStr());
+      const [fAmount, setFAmount] = useState("");
+      const [fSite, setFSite] = useState("");
+      const [fWork, setFWork] = useState("");
+      const [fPay, setFPay] = useState("현금");
+
+      const [selYear, setSelYear] = useState(String(new Date().getFullYear()));
+      const [selMo, setSelMo] = useState(String(new Date().getMonth()+1).padStart(2,"0"));
+
+      const [sMode, setSMode] = useState("name");
+      const [sQuery, setSQuery] = useState("");
+
+      const [workerModal, setWorkerModal] = useState(false);
+      const [wName, setWName] = useState("");
+      const [wPhone, setWPhone] = useState("");
+      const [wRRN, setWRRN] = useState("");
+      const [wPhoto, setWPhoto] = useState(null);
+      const [viewW, setViewW] = useState(null);
+      const [showRRN, setShowRRN] = useState(false);
+
+      const [settingsOpen, setSettingsOpen] = useState(false);
+      const [settingsVal, setSettingsVal] = useState("");
+      const [shareOpen, setShareOpen] = useState(false);
+      const [shareImgUrl, setShareImgUrl] = useState("");
+      const [shareCanvas, setShareCanvas] = useState(null);
+
+      const photoRef = useRef(null);
+
+      // localStorage 로드
+      useEffect(() => {
+        try { const r=localStorage.getItem("dp-rec"); if(r) setRecords(JSON.parse(r)); } catch(e){}
+        try { const w=localStorage.getItem("dp-wkr"); if(w) setWorkers(JSON.parse(w)); } catch(e){}
+        try { const c=localStorage.getItem("dp-co"); if(c) setCompany(c); } catch(e){}
+        setLoaded(true);
+      }, []);
+
+      useEffect(() => { if(loaded) localStorage.setItem("dp-rec", JSON.stringify(records)); }, [records, loaded]);
+      useEffect(() => { if(loaded) localStorage.setItem("dp-wkr", JSON.stringify(workers)); }, [workers, loaded]);
+
+      const toast = (msg) => { setToastMsg(msg); setTimeout(()=>setToastMsg(""),2000); };
+
+      const handleSave = () => {
+        if (!fName.trim()||!fDate||!fAmount) { toast("이름·날짜·금액은 필수예요"); return; }
+        const amt = parseInt(fAmount.replace(/,/g,""),10);
+        if (isNaN(amt)||amt<=0) { toast("금액을 확인해주세요"); return; }
+        const rec = { id:editId||Date.now(), name:fName.trim(), date:fDate, amount:amt, site:fSite.trim(), work:fWork.trim(), payMethod:fPay };
+        if (editId) { setRecords(p=>p.map(r=>r.id===editId?rec:r)); setEditId(null); toast("수정 완료"); }
+        else { setRecords(p=>[...p,rec]); toast("저장 완료"); }
+        setFName(""); setFDate(todayStr()); setFAmount("");
+      };
+
+      const startEdit = (r) => {
+        setFName(r.name); setFDate(r.date); setFAmount(String(r.amount));
+        setFSite(r.site||""); setFWork(r.work||""); setFPay(r.payMethod||"현금");
+        setEditId(r.id); setTab("input");
+      };
+
+      const delRec = (id) => { if(!confirm("삭제할까요?"))return; setRecords(p=>p.filter(r=>r.id!==id)); toast("삭제"); };
+
+      const handlePhoto = async (e) => { const f=e.target.files[0]; if(f) setWPhoto(await shrinkImg(f)); };
+
+      const saveWorker = () => {
+        if (!wName.trim()) { toast("이름을 입력해주세요"); return; }
+        const wObj = { id:Date.now(), name:wName.trim(), phone:wPhone.trim(), rrn:wRRN.replace(/-/g,""), photo:wPhoto, regDate:todayStr() };
+        const exists = workers.find(w=>w.name===wName.trim());
+        if (exists) { setWorkers(p=>p.map(w=>w.name===wName.trim()?{...w,...wObj,id:w.id}:w)); }
+        else { setWorkers(p=>[...p,wObj]); }
+        toast("저장 완료"); setWName(""); setWPhone(""); setWRRN(""); setWPhoto(null); setWorkerModal(false);
+      };
+
+      const delWorker = (id) => { if(!confirm("삭제할까요?"))return; setWorkers(p=>p.filter(w=>w.id!==id)); setViewW(null); toast("삭제"); };
+
+      const allNames = [...new Set(records.map(r=>r.name))].sort();
+      const allSites = [...new Set(records.map(r=>r.site).filter(Boolean))].sort();
+      const allWorks = [...new Set(records.map(r=>r.work).filter(Boolean))].sort();
+
+      const selMonth = selYear+"-"+selMo;
+      const mRecs = records.filter(r=>r.date.startsWith(selMonth));
+      const mTotal = mRecs.reduce((s,r)=>s+r.amount,0);
+      const mTax   = mRecs.reduce((s,r)=>s+calcTax(r.amount),0);
+      const mCash  = mRecs.filter(r=>(r.payMethod||"현금")==="현금").reduce((s,r)=>s+r.amount,0);
+      const mXfer  = mRecs.filter(r=>r.payMethod==="계좌이체").reduce((s,r)=>s+r.amount,0);
+      const byWM = {};
+      mRecs.forEach(r=>{ if(!byWM[r.name])byWM[r.name]={total:0,taxSum:0,days:0}; byWM[r.name].total+=r.amount;byWM[r.name].taxSum+=calcTax(r.amount);byWM[r.name].days++; });
+
+      const sRecs = sQuery.trim() ? records.filter(r=>{
+        if(sMode==="name") return r.name.includes(sQuery.trim());
+        if(sMode==="work") return (r.work||"").includes(sQuery.trim());
+        return (r.site||"").includes(sQuery.trim());
+      }) : [];
+      const srTotal=sRecs.reduce((s,r)=>s+r.amount,0), srTax=sRecs.reduce((s,r)=>s+calcTax(r.amount),0);
+      const grp=(recs,key)=>{ const g={}; recs.forEach(r=>{const k=r[key]||"미입력"; if(!g[k])g[k]={total:0,taxSum:0,days:0}; g[k].total+=r.amount;g[k].taxSum+=calcTax(r.amount);g[k].days++;}); return g; };
+      const srByName=grp(sRecs,"name"), srByWork=grp(sRecs,"work"), srBySite=grp(sRecs,"site");
+
+      const previewTax = (()=>{ const n=parseInt(fAmount.replace(/,/g,""),10); return !isNaN(n)&&n>0?calcTax(n):null; })();
+
+      const handleShare = () => {
+        if (!sRecs.length) { toast("검색 결과가 없어요"); return; }
+        const cv = makeShareImg(sQuery, [...sRecs].sort((a,b)=>b.date.localeCompare(a.date)), srTotal, srTax, company);
+        setShareCanvas(cv); setShareImgUrl(cv.toDataURL()); setShareOpen(true);
+      };
+
+      const doShare = (method) => {
+        if (!shareCanvas) return;
+        shareCanvas.toBlob(async (blob) => {
+          if (method==="save") {
+            const a=document.createElement("a"); a.href=URL.createObjectURL(blob);
+            a.download="DayPay_"+sQuery+"_"+todayStr()+".png"; a.click(); toast("이미지 저장 완료");
+          } else {
+            try {
+              const file=new File([blob],"DayPay.png",{type:"image/png"});
+              if (navigator.share&&navigator.canShare&&navigator.canShare({files:[file]})) {
+                await navigator.share({files:[file],title:"DayPay 급여 내역",text:sQuery+" 급여 내역"});
+              } else if (navigator.share) {
+                await navigator.share({title:"DayPay 급여 내역",text:sQuery+" 급여 내역 — DayPay"});
+              } else {
+                const a=document.createElement("a"); a.href=URL.createObjectURL(blob);
+                a.download="DayPay_"+sQuery+".png"; a.click(); toast("이미지 저장 완료");
+              }
+            } catch(e) { if(e.name!=="AbortError") toast("이미지 저장을 이용해주세요"); }
+          }
+        }, "image/png");
+        setShareOpen(false);
+      };
+
+      const exportCSV = () => {
+        const rows=[["날짜","성명","현장","공정","지급액","지급방식","원천세"]];
+        [...mRecs].sort((a,b)=>a.date.localeCompare(b.date)).forEach(r=>rows.push([r.date,r.name,r.site||"",r.work||"",r.amount,r.payMethod||"현금",calcTax(r.amount)]));
+        const csv=rows.map(r=>r.join(",")).join("\n");
+        const blob=new Blob(["\uFEFF"+csv],{type:"text/csv;charset=utf-8"});
+        const a=document.createElement("a"); a.href=URL.createObjectURL(blob); a.download="DayPay_"+selMonth+".csv"; a.click();
+      };
+
+      const TABS=[["input","📝 입력"],["calendar","📅 달력"],["monthly","📊 월별"],["search","🔍 검색"],["workers","👷 근로자"]];
+      const YEARS=["2023","2024","2025","2026"];
+      const MOS=["01","02","03","04","05","06","07","08","09","10","11","12"];
+
+      return (
+        <div style={{ minHeight:"100vh", background:BG }}>
+
+          {/* 헤더 */}
+          <div style={{ background:"linear-gradient(135deg,"+NAVY+","+NAVY2+")", position:"sticky", top:0, zIndex:40, boxShadow:"0 4px 20px rgba(26,32,64,0.3)" }}>
+            <div style={{ padding:"16px 16px 0", display:"flex", alignItems:"flex-start", justifyContent:"space-between" }}>
+              <div>
+                {company ? <div style={{ fontSize:10,color:GOLD,fontWeight:700,letterSpacing:"1.5px",marginBottom:3 }}>{company}</div> : null}
+                <div style={{ display:"flex", alignItems:"baseline", gap:8 }}>
+                  <span style={{ fontSize:24,fontWeight:800,color:"#fff",letterSpacing:"-0.5px" }}>DayPay</span>
+                  <span style={{ fontSize:11,color:"#7080a8" }}>현장 급여 관리</span>
+                </div>
+              </div>
+              <div style={{ display:"flex", gap:6, paddingTop:4 }}>
+                <button onClick={()=>{setSettingsVal(company);setSettingsOpen(true);}} style={{ fontSize:11,padding:"6px 10px",borderRadius:6,border:"1px solid rgba(255,255,255,0.15)",background:"rgba(255,255,255,0.08)",color:"#a0aab8",cursor:"pointer",fontFamily:"inherit" }}>⚙️</button>
+                <button onClick={()=>{setWName("");setWPhone("");setWRRN("");setWPhoto(null);setWorkerModal(true);}} style={{ fontSize:11,padding:"6px 12px",borderRadius:6,border:"1px solid "+GOLD+"80",background:GOLD+"25",color:GOLD,cursor:"pointer",fontFamily:"inherit",fontWeight:700 }}>+ 근로자</button>
+              </div>
+            </div>
+            <div style={{ height:1,background:"linear-gradient(90deg,"+GOLD+",transparent)",marginTop:10,opacity:0.4 }} />
+            <div style={{ display:"flex" }}>
+              {TABS.map(([k,v])=>(
+                <button key={k} onClick={()=>setTab(k)} style={{ flex:1,padding:"9px 0",fontSize:10,fontWeight:tab===k?700:400,background:"transparent",color:tab===k?GOLD:"#5060a0",border:"none",cursor:"pointer",fontFamily:"inherit",borderBottom:tab===k?"2px solid "+GOLD:"2px solid transparent",transition:"all 0.15s" }}>{v}</button>
+              ))}
+            </div>
+          </div>
+
+          <div style={{ padding:"12px 14px 80px" }}>
+
+            {/* 입력 탭 */}
+            {tab==="input" && (
+              <div>
+                <div style={{ background:"#fff",borderRadius:14,border:"1px solid "+BORDER,padding:18,marginBottom:14,boxShadow:"0 4px 16px rgba(26,32,64,0.07)" }}>
+                  <div style={{ display:"flex",alignItems:"center",gap:8,marginBottom:14 }}>
+                    <div style={{ width:3,height:18,background:GOLD,borderRadius:2 }} />
+                    <span style={{ fontSize:13,color:MID,fontWeight:700 }}>{editId?"✏️ 수정 중":"새 지급 내역"}</span>
+                  </div>
+                  <div style={{ display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:10 }}>
+                    <div><Lbl>성명 *</Lbl><input value={fName} onChange={e=>setFName(e.target.value)} placeholder="홍길동" list="dn" style={INP}/><datalist id="dn">{allNames.map((n,i)=><option key={i} value={n}/>)}</datalist></div>
+                    <div><Lbl>날짜 *</Lbl><input type="date" value={fDate} onChange={e=>setFDate(e.target.value)} style={INP}/></div>
+                  </div>
+                  <div style={{ display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:10 }}>
+                    <div><Lbl>현장명</Lbl><input value={fSite} onChange={e=>setFSite(e.target.value)} placeholder="강남 아파트" list="ds" style={INP}/><datalist id="ds">{allSites.map((s,i)=><option key={i} value={s}/>)}</datalist></div>
+                    <div><Lbl>공정</Lbl><input value={fWork} onChange={e=>setFWork(e.target.value)} placeholder="도배·타일·목공" list="dw" style={INP}/><datalist id="dw">{allWorks.map((w,i)=><option key={i} value={w}/>)}</datalist></div>
+                  </div>
+                  <div style={{ marginBottom:10 }}>
+                    <Lbl>지급액 (원) *</Lbl>
+                    <input value={fAmount} onChange={e=>setFAmount(e.target.value)} placeholder="150,000" inputMode="numeric" style={INP}/>
+                    {previewTax!==null && <div style={{ fontSize:11,color:ORANGE,marginTop:5,background:"#fdf6ee",border:"1px solid #f0d8b0",borderRadius:6,padding:"5px 10px" }}>추정 원천세: <strong>{krw(previewTax)}</strong> <span style={{ color:LIGHT }}>(일 15만원 공제 후 6%×55%)</span></div>}
+                  </div>
+                  <div style={{ marginBottom:16 }}>
+                    <Lbl>지급방식</Lbl>
+                    <div style={{ display:"flex",gap:8 }}>
+                      {["현금","계좌이체"].map(m=>(
+                        <button key={m} onClick={()=>setFPay(m)} style={{ flex:1,padding:"9px 0",borderRadius:8,cursor:"pointer",fontFamily:"inherit",fontSize:13,fontWeight:600,border:fPay===m?"1.5px solid "+GOLD:"1.5px solid "+BORDER,background:fPay===m?GOLD+"18":"#faf9f6",color:fPay===m?GOLD:MID,transition:"all 0.15s" }}>{m==="현금"?"💵 현금":"🏦 계좌이체"}</button>
+                      ))}
+                    </div>
+                    {fPay==="현금"&&<div style={{ fontSize:11,color:ORANGE,marginTop:5,background:"#fdf6ee",border:"1px solid #f0d8b0",borderRadius:6,padding:"5px 10px" }}>⚠️ 현금 지급 시 수령증(서명)을 받아두세요</div>}
+                  </div>
+                  <div style={{ display:"flex",gap:8 }}>
+                    <NavyBtn onClick={handleSave} style={{ flex:1 }}>{editId?"수정 완료":"+ 저장"}</NavyBtn>
+                    {editId&&<button onClick={()=>{setEditId(null);setFName("");setFDate(todayStr());setFAmount("");}} style={{ padding:"12px 14px",borderRadius:10,border:"1px solid "+BORDER,background:"#f5f4f0",color:MID,cursor:"pointer",fontFamily:"inherit",fontWeight:600 }}>취소</button>}
+                  </div>
+                </div>
+                <SecTitle>최근 내역</SecTitle>
+                {records.length===0&&<Empty text="입력된 내역이 없습니다"/>}
+                {[...records].sort((a,b)=>b.id-a.id).slice(0,30).map(r=><RCard key={r.id} r={r} onEdit={startEdit} onDelete={delRec}/>)}
+              </div>
+            )}
+
+            {/* 달력 탭 */}
+            {tab==="calendar"&&<CalendarTab records={records} onEdit={startEdit} onDelete={delRec}/>}
+
+            {/* 월별 탭 */}
+            {tab==="monthly"&&(
+              <div>
+                <div style={{ display:"flex",gap:8,marginBottom:14 }}>
+                  <select value={selYear} onChange={e=>setSelYear(e.target.value)} style={{ padding:"9px 10px",borderRadius:8,border:"1.5px solid "+BORDER,background:"#fff",color:NAVY,fontSize:13,fontFamily:"inherit",outline:"none" }}>{YEARS.map(y=><option key={y} value={y}>{y}년</option>)}</select>
+                  <select value={selMo} onChange={e=>setSelMo(e.target.value)} style={{ padding:"9px 10px",borderRadius:8,border:"1.5px solid "+BORDER,background:"#fff",color:NAVY,fontSize:13,fontFamily:"inherit",outline:"none" }}>{MOS.map(m=><option key={m} value={m}>{parseInt(m,10)}월</option>)}</select>
+                </div>
+                <div style={{ background:"linear-gradient(135deg,"+NAVY+","+NAVY2+")",borderRadius:16,padding:20,marginBottom:14,boxShadow:"0 8px 24px rgba(26,32,64,0.25)" }}>
+                  <div style={{ fontSize:10,color:GOLD,fontWeight:700,letterSpacing:"1.5px",marginBottom:12 }}>{selYear}년 {parseInt(selMo,10)}월 요약</div>
+                  <div style={{ display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10,marginBottom:14 }}>
+                    {[["총 지급액",krw(mTotal),"#fff"],["원천세",krw(mTax),"#e8d4a0"],["건수",mRecs.length+"건","#a0c8ff"]].map(([l,v,c])=>(
+                      <div key={l}><div style={{ fontSize:10,color:"#5060a0",marginBottom:3 }}>{l}</div><div style={{ fontSize:15,fontWeight:700,color:c }}>{v}</div></div>
+                    ))}
+                  </div>
+                  <div style={{ display:"grid",gridTemplateColumns:"1fr 1fr",gap:8 }}>
+                    {[["💵 현금",krw(mCash)],["🏦 계좌이체",krw(mXfer)]].map(([l,v])=>(
+                      <div key={l} style={{ background:"rgba(255,255,255,0.1)",borderRadius:8,padding:"8px 12px",border:"1px solid rgba(255,255,255,0.08)" }}>
+                        <div style={{ fontSize:10,color:"#5060a0",marginBottom:2 }}>{l}</div>
+                        <div style={{ fontWeight:700,color:"#fff",fontSize:13 }}>{v}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                {Object.keys(byWM).length>0&&(
+                  <div style={{ marginBottom:14 }}>
+                    <SecTitle>인별 집계</SecTitle>
+                    {Object.entries(byWM).sort((a,b)=>b[1].total-a[1].total).map(([n,s])=>{
+                      const wp=workers.find(w=>w.name===n);
+                      return (
+                        <div key={n} style={{ background:"#fff",borderRadius:12,border:"1px solid "+BORDER,padding:"12px 14px",marginBottom:8,boxShadow:"0 2px 8px rgba(26,32,64,0.05)" }}>
+                          <div style={{ display:"flex",alignItems:"center",gap:8 }}>
+                            {wp&&wp.photo?<img src={wp.photo} style={{ width:28,height:28,borderRadius:6,objectFit:"cover" }}/>:<div style={{ width:28,height:28,borderRadius:6,background:"#eeedf0",display:"flex",alignItems:"center",justifyContent:"center",fontSize:14 }}>👤</div>}
+                            <span style={{ fontWeight:700 }}>{n}</span>
+                            <span style={{ fontSize:11,color:LIGHT }}>{s.days}일</span>
+                            <span style={{ marginLeft:"auto",color:NAVY,fontWeight:700 }}>{krw(s.total)}</span>
+                          </div>
+                          <div style={{ marginTop:6,fontSize:11,color:ORANGE,background:"#fdf6ee",display:"inline-block",padding:"2px 8px",borderRadius:5 }}>원천세 {krw(s.taxSum)}</div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+                {mRecs.length>0&&(
+                  <div>
+                    <SecTitle>일별 상세</SecTitle>
+                    {[...mRecs].sort((a,b)=>a.date.localeCompare(b.date)).map(r=><RCard key={r.id} r={r} onEdit={startEdit} onDelete={delRec}/>)}
+                    <button onClick={exportCSV} style={{ width:"100%",marginTop:12,padding:"12px 0",borderRadius:10,border:"1.5px solid "+NAVY,background:"transparent",color:NAVY,fontSize:13,cursor:"pointer",fontFamily:"inherit",fontWeight:700 }}>📥 CSV 내보내기</button>
+                  </div>
+                )}
+                {mRecs.length===0&&<Empty text="해당 월 데이터가 없습니다"/>}
+              </div>
+            )}
+
+            {/* 검색 탭 */}
+            {tab==="search"&&(
+              <div>
+                <div style={{ display:"flex",marginBottom:10,borderRadius:10,overflow:"hidden",border:"1px solid "+BORDER,background:"#fff" }}>
+                  {[["name","👤 인별"],["work","🔧 공정별"],["site","📍 현장별"]].map(([k,v])=>(
+                    <button key={k} onClick={()=>{setSMode(k);setSQuery("");}} style={{ flex:1,padding:"10px 0",fontSize:12,fontWeight:sMode===k?700:400,background:sMode===k?NAVY:"transparent",color:sMode===k?"#fff":MID,border:"none",cursor:"pointer",borderRight:k!=="site"?"1px solid "+BORDER:"none",fontFamily:"inherit",transition:"all 0.15s" }}>{v}</button>
+                  ))}
+                </div>
+                <div style={{ position:"relative",marginBottom:10 }}>
+                  <span style={{ position:"absolute",left:11,top:"50%",transform:"translateY(-50%)",fontSize:15 }}>🔍</span>
+                  <input value={sQuery} onChange={e=>setSQuery(e.target.value)} list={sMode==="name"?"sn":sMode==="work"?"sw":"ss"} placeholder={sMode==="name"?"이름으로 검색...":sMode==="work"?"공정명 검색...":"현장명 검색..."} style={{ ...INP,paddingLeft:36 }}/>
+                  <datalist id="sn">{allNames.map((n,i)=><option key={i} value={n}/>)}</datalist>
+                  <datalist id="sw">{allWorks.map((n,i)=><option key={i} value={n}/>)}</datalist>
+                  <datalist id="ss">{allSites.map((n,i)=><option key={i} value={n}/>)}</datalist>
+                </div>
+                {!sQuery&&(
+                  <div style={{ marginBottom:14 }}>
+                    <div style={{ fontSize:11,color:LIGHT,marginBottom:6,fontWeight:600 }}>바로가기</div>
+                    <div style={{ display:"flex",flexWrap:"wrap",gap:6 }}>
+                      {(sMode==="name"?allNames:sMode==="work"?allWorks:allSites).map((v,i)=>(
+                        <button key={i} onClick={()=>setSQuery(v)} style={{ padding:"7px 14px",borderRadius:20,border:"1px solid "+BORDER,background:"#fff",color:NAVY,fontSize:12,cursor:"pointer",fontFamily:"inherit",fontWeight:500 }}>{v}</button>
+                      ))}
+                      {(sMode==="name"?allNames:sMode==="work"?allWorks:allSites).length===0&&<span style={{ fontSize:12,color:LIGHT }}>데이터를 먼저 입력해주세요</span>}
+                    </div>
+                  </div>
+                )}
+                {sQuery.trim()&&sRecs.length>0&&(
+                  <div>
+                    <div style={{ background:"linear-gradient(135deg,"+NAVY+","+NAVY2+")",borderRadius:14,padding:16,marginBottom:12,boxShadow:"0 6px 18px rgba(26,32,64,0.22)" }}>
+                      <div style={{ display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10 }}>
+                        <div>
+                          <div style={{ fontSize:10,color:GOLD,fontWeight:700,marginBottom:4 }}>검색 결과</div>
+                          <div style={{ fontSize:16,fontWeight:700,color:"#fff" }}>"{sQuery}" — {sRecs.length}건</div>
+                        </div>
+                        <button onClick={handleShare} style={{ padding:"8px 14px",borderRadius:8,border:"1px solid "+GOLD+"80",background:GOLD+"25",color:GOLD,fontSize:12,cursor:"pointer",fontFamily:"inherit",fontWeight:700,flexShrink:0 }}>📤 공유</button>
+                      </div>
+                      <div style={{ display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8 }}>
+                        {[["총 지급액",krw(srTotal),"#fff"],["원천세",krw(srTax),"#e8d4a0"],["건수",sRecs.length+"건","#a0c8ff"]].map(([l,v,c])=>(
+                          <div key={l}><div style={{ fontSize:10,color:"#5060a0",marginBottom:2 }}>{l}</div><div style={{ fontSize:14,fontWeight:700,color:c }}>{v}</div></div>
+                        ))}
+                      </div>
+                    </div>
+                    {sMode==="name"&&Object.keys(srByWork).length>1&&<GrpSection title="공정별 내역" data={srByWork}/>}
+                    {sMode==="name"&&Object.keys(srBySite).length>1&&<GrpSection title="현장별 내역" data={srBySite}/>}
+                    {(sMode==="work"||sMode==="site")&&(
+                      <div style={{ marginBottom:12 }}>
+                        <SecTitle>인별 내역</SecTitle>
+                        {Object.entries(srByName).sort((a,b)=>b[1].total-a[1].total).map(([n,s])=>{
+                          const wp=workers.find(w=>w.name===n);
+                          return (
+                            <div key={n} style={{ background:"#fff",borderRadius:10,border:"1px solid "+BORDER,padding:"11px 13px",marginBottom:6,display:"flex",alignItems:"center",gap:8 }}>
+                              {wp&&wp.photo?<img src={wp.photo} style={{ width:30,height:30,borderRadius:6,objectFit:"cover" }}/>:<div style={{ width:30,height:30,borderRadius:6,background:"#eeedf0",display:"flex",alignItems:"center",justifyContent:"center",fontSize:15 }}>👤</div>}
+                              <div style={{ flex:1 }}>
+                                <div style={{ display:"flex",justifyContent:"space-between" }}><span style={{ fontWeight:700 }}>{n}</span><span style={{ color:NAVY,fontWeight:700 }}>{krw(s.total)}</span></div>
+                                <div style={{ fontSize:11,color:LIGHT,marginTop:2 }}>{s.days}일 · 세금 {krw(s.taxSum)}</div>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                    <SecTitle>상세 내역</SecTitle>
+                    {[...sRecs].sort((a,b)=>b.date.localeCompare(a.date)).map(r=><RCard key={r.id} r={r} onEdit={startEdit} onDelete={delRec}/>)}
+                  </div>
+                )}
+                {sQuery.trim()&&sRecs.length===0&&<Empty text={'"'+sQuery+'" 검색 결과가 없습니다'}/>}
+              </div>
+            )}
+
+            {/* 근로자 탭 */}
+            {tab==="workers"&&(
+              <div>
+                <div style={{ fontSize:13,color:MID,fontWeight:700,marginBottom:10 }}>등록된 근로자 {workers.length}명</div>
+                {workers.length===0&&<Empty text="근로자를 등록해주세요"/>}
+                <div style={{ display:"grid",gridTemplateColumns:"1fr 1fr",gap:10 }}>
+                  {workers.map(w=>(
+                    <div key={w.id} onClick={()=>setViewW(w)} style={{ background:"#fff",borderRadius:12,border:"1px solid "+BORDER,padding:14,cursor:"pointer",boxShadow:"0 2px 8px rgba(26,32,64,0.05)" }}>
+                      <div style={{ display:"flex",justifyContent:"center",marginBottom:8 }}>
+                        {w.photo?<img src={w.photo} style={{ width:64,height:64,borderRadius:10,objectFit:"cover",border:"2px solid "+BORDER }}/>:<div style={{ width:64,height:64,borderRadius:10,background:"#eeedf0",display:"flex",alignItems:"center",justifyContent:"center",fontSize:26 }}>👤</div>}
+                      </div>
+                      <div style={{ textAlign:"center",fontWeight:700,marginBottom:2 }}>{w.name}</div>
+                      {w.phone?<div style={{ textAlign:"center",fontSize:11,color:LIGHT }}>{w.phone}</div>:null}
+                      {w.rrn?<div style={{ textAlign:"center",fontSize:11,color:MID,marginTop:2 }}>{maskRRN(w.rrn)}</div>:null}
+                      <div style={{ textAlign:"center",fontSize:11,color:GOLD,marginTop:4,fontWeight:700 }}>{records.filter(r=>r.name===w.name).length}건 지급</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* 공유 모달 */}
+          {shareOpen&&(
+            <BottomModal onClose={()=>setShareOpen(false)}>
+              <div style={{ fontSize:16,fontWeight:700,marginBottom:6 }}>📤 공유하기</div>
+              <div style={{ fontSize:12,color:MID,marginBottom:14 }}>카톡·문자·이메일로 보내거나 이미지로 저장하세요</div>
+              {shareImgUrl&&<img src={shareImgUrl} style={{ width:"100%",borderRadius:10,border:"1px solid "+BORDER,marginBottom:14 }}/>}
+              <NavyBtn onClick={()=>doShare("share")} style={{ width:"100%",marginBottom:8 }}>📲 카톡·문자·이메일로 공유</NavyBtn>
+              <button onClick={()=>doShare("save")} style={{ width:"100%",padding:"12px 0",borderRadius:10,border:"1.5px solid "+BORDER,background:"#f5f4f0",color:NAVY,fontWeight:600,fontSize:14,cursor:"pointer",fontFamily:"inherit" }}>💾 이미지로 저장</button>
+            </BottomModal>
+          )}
+
+          {/* 근로자 등록 모달 */}
+          {workerModal&&(
+            <BottomModal onClose={()=>setWorkerModal(false)}>
+              <div style={{ fontSize:16,fontWeight:700,marginBottom:16 }}>근로자 등록</div>
+              <div style={{ marginBottom:14 }}>
+                <Lbl>신분증 사진</Lbl>
+                <div style={{ display:"flex",gap:12,alignItems:"center" }}>
+                  {wPhoto?<img src={wPhoto} style={{ width:76,height:76,borderRadius:10,objectFit:"cover",border:"2px solid "+BORDER }}/>:<div style={{ width:76,height:76,borderRadius:10,background:"#eeedf0",display:"flex",alignItems:"center",justifyContent:"center",fontSize:26,border:"1.5px dashed "+BORDER }}>📷</div>}
+                  <div style={{ flex:1 }}>
+                    <input ref={photoRef} type="file" accept="image/*" capture="environment" onChange={handlePhoto} style={{ display:"none" }}/>
+                    <button onClick={()=>photoRef.current&&photoRef.current.click()} style={{ width:"100%",padding:"8px 0",borderRadius:8,border:"1.5px solid "+GOLD,background:GOLD+"15",color:GOLD,fontSize:13,cursor:"pointer",fontFamily:"inherit",fontWeight:700,marginBottom:6 }}>📷 카메라 촬영</button>
+                    <button onClick={()=>{ if(!photoRef.current)return; photoRef.current.removeAttribute("capture"); photoRef.current.click(); setTimeout(()=>photoRef.current&&photoRef.current.setAttribute("capture","environment"),500); }} style={{ width:"100%",padding:"8px 0",borderRadius:8,border:"1.5px solid "+BORDER,background:"#f5f4f0",color:MID,fontSize:13,cursor:"pointer",fontFamily:"inherit",fontWeight:600 }}>🖼 갤러리 선택</button>
+                  </div>
+                </div>
+                <div style={{ fontSize:10,color:LIGHT,marginTop:4 }}>* 사진은 이 기기에만 저장됩니다</div>
+              </div>
+              <div style={{ marginBottom:10 }}><Lbl>성명 *</Lbl><input value={wName} onChange={e=>setWName(e.target.value)} placeholder="홍길동" style={INP}/></div>
+              <div style={{ marginBottom:10 }}>
+                <Lbl>주민등록번호</Lbl>
+                <input value={wRRN} onChange={e=>setWRRN(formatRRN(e.target.value))} placeholder="000000-0000000" inputMode="numeric" maxLength={14} style={INP}/>
+                <div style={{ fontSize:10,color:LIGHT,marginTop:4 }}>홈택스 신고 시 필요 · 앱 내에서만 사용됩니다</div>
+              </div>
+              <div style={{ marginBottom:18 }}><Lbl>연락처</Lbl><input value={wPhone} onChange={e=>setWPhone(e.target.value)} placeholder="010-0000-0000" inputMode="tel" style={INP}/></div>
+              <div style={{ display:"flex",gap:8 }}>
+                <button onClick={()=>setWorkerModal(false)} style={{ flex:1,padding:"12px 0",borderRadius:10,border:"1px solid "+BORDER,background:"#f5f4f0",color:MID,cursor:"pointer",fontFamily:"inherit",fontWeight:600,fontSize:14 }}>취소</button>
+                <NavyBtn onClick={saveWorker} style={{ flex:2 }}>저장</NavyBtn>
+              </div>
+            </BottomModal>
+          )}
+
+          {/* 근로자 상세 모달 */}
+          {viewW&&(
+            <BottomModal onClose={()=>{setViewW(null);setShowRRN(false);}}>
+              <div style={{ display:"flex",justifyContent:"center",marginBottom:12 }}>
+                {viewW.photo?<img src={viewW.photo} style={{ width:96,height:96,borderRadius:12,objectFit:"cover",border:"2px solid "+BORDER }}/>:<div style={{ width:96,height:96,borderRadius:12,background:"#eeedf0",display:"flex",alignItems:"center",justifyContent:"center",fontSize:38 }}>👤</div>}
+              </div>
+              <div style={{ textAlign:"center",fontSize:20,fontWeight:700,marginBottom:6 }}>{viewW.name}</div>
+              {viewW.rrn&&(
+                <div style={{ textAlign:"center",marginBottom:4 }}>
+                  <span style={{ fontSize:13,color:MID,fontFamily:"monospace" }}>{showRRN?(viewW.rrn.slice(0,6)+"-"+viewW.rrn.slice(6)):maskRRN(viewW.rrn)}</span>
+                  <button onClick={()=>setShowRRN(p=>!p)} style={{ marginLeft:8,fontSize:11,color:GOLD,background:"none",border:"none",cursor:"pointer",fontFamily:"inherit" }}>{showRRN?"숨기기":"보기"}</button>
+                </div>
+              )}
+              {viewW.phone?<div style={{ textAlign:"center",color:MID,marginBottom:4,fontSize:14 }}>{viewW.phone}</div>:null}
+              <div style={{ textAlign:"center",fontSize:11,color:LIGHT,marginBottom:4 }}>등록일 {viewW.regDate}</div>
+              <div style={{ textAlign:"center",fontSize:13,color:GOLD,fontWeight:700,marginBottom:20 }}>
+                총 {records.filter(r=>r.name===viewW.name).length}건 · {krw(records.filter(r=>r.name===viewW.name).reduce((s,r)=>s+r.amount,0))} 지급
+              </div>
+              <div style={{ display:"flex",gap:8 }}>
+                <button onClick={()=>{setViewW(null);setShowRRN(false);setWName(viewW.name);setWPhone(viewW.phone||"");setWRRN(viewW.rrn?viewW.rrn.slice(0,6)+"-"+viewW.rrn.slice(6):"");setWPhoto(viewW.photo||null);setWorkerModal(true);}} style={{ flex:1,padding:"12px 0",borderRadius:10,border:"1.5px solid "+GOLD,background:GOLD+"15",color:GOLD,cursor:"pointer",fontFamily:"inherit",fontWeight:700,fontSize:14 }}>수정</button>
+                <button onClick={()=>delWorker(viewW.id)} style={{ flex:1,padding:"12px 0",borderRadius:10,border:"1.5px solid #f0c0c0",background:"#fff5f5",color:"#c04040",cursor:"pointer",fontFamily:"inherit",fontWeight:700,fontSize:14 }}>삭제</button>
+              </div>
+            </BottomModal>
+          )}
+
+          {/* 설정 모달 */}
+          {settingsOpen&&(
+            <BottomModal onClose={()=>setSettingsOpen(false)}>
+              <div style={{ fontSize:16,fontWeight:700,marginBottom:16 }}>⚙️ 설정</div>
+              <div style={{ marginBottom:20 }}>
+                <Lbl>회사명 (사업장명)</Lbl>
+                <input value={settingsVal} onChange={e=>setSettingsVal(e.target.value)} placeholder="예: 나경 인테리어" style={INP}/>
+                <div style={{ fontSize:11,color:LIGHT,marginTop:5 }}>앱 상단과 공유 이미지에 표시됩니다</div>
+              </div>
+              <div style={{ display:"flex",gap:8 }}>
+                <button onClick={()=>setSettingsOpen(false)} style={{ flex:1,padding:"12px 0",borderRadius:10,border:"1px solid "+BORDER,background:"#f5f4f0",color:MID,cursor:"pointer",fontFamily:"inherit",fontWeight:600,fontSize:14 }}>취소</button>
+                <NavyBtn onClick={()=>{ setCompany(settingsVal); localStorage.setItem("dp-co",settingsVal); setSettingsOpen(false); toast("저장 완료"); }} style={{ flex:2 }}>저장</NavyBtn>
+              </div>
+            </BottomModal>
+          )}
+
+          {toastMsg&&(
+            <div style={{ position:"fixed",bottom:30,left:"50%",transform:"translateX(-50%)",background:NAVY,color:"#fff",padding:"10px 22px",borderRadius:28,fontSize:13,fontWeight:600,zIndex:999,whiteSpace:"nowrap",boxShadow:"0 4px 16px rgba(26,32,64,0.35)",borderLeft:"3px solid "+GOLD }}>
+              {toastMsg}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById("root"));
+    root.render(<App/>);
+  </script>
+</body>
+</html>
